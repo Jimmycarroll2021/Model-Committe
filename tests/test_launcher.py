@@ -117,3 +117,9 @@ def test_wmi_launch_runs_outside_parent_and_cleans_up_env(tmp_path: Path):
     manifest = reconcile_interrupted(tmp_path / "wmi-1")
     assert manifest.status == "failed" and "not available" in manifest.error
     assert not (launch / "wmi-1.env.json").exists()  # secrets copy removed by the child
+
+
+def test_interrupted_run_ends_at_last_activity_not_discovery(tmp_path: Path):
+    store = _running_store(tmp_path, owner_pid=_dead_pid(), owner_started=1.0)
+    store.log_event(Event(ts="2026-01-01T00:05:00+00:00", type="member.finished", member="m1"))
+    assert reconcile_interrupted(store.dir).finished_at == "2026-01-01T00:05:00+00:00"

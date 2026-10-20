@@ -162,6 +162,15 @@ def owner_alive(manifest: RunManifest, run_dir: Path | None = None) -> bool:
     return manifest.owner_started is None or not started or abs(started - manifest.owner_started) < 2.0
 
 
+def _last_event_ts(run_dir: Path) -> str | None:
+    """When the run was last seen doing something: a dead run's duration should end there, not at discovery."""
+    try:
+        lines = (run_dir / "events.jsonl").read_text(encoding="utf-8").strip().splitlines()
+        return json.loads(lines[-1])["ts"] if lines else None
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def reconcile_interrupted(run_dir: Path) -> RunManifest:
     """Load a manifest; if it claims "running" but its owner process is gone, record it as interrupted."""
     path = run_dir / "run-manifest.json"
@@ -170,7 +179,7 @@ def reconcile_interrupted(run_dir: Path) -> RunManifest:
         manifest.status = "failed"
         manifest.error = ("cancelled by user" if (run_dir / "CANCELLED").exists()
                           else "interrupted: the process running this committee exited before it finished")
-        manifest.finished_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        manifest.finished_at = _last_event_ts(run_dir) or datetime.now().astimezone().isoformat(timespec="seconds")
         for member in manifest.members:
             if member.status.value in ("pending", "running"):
                 member.status = MemberStatus.failed
