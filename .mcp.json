@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "model-committee": {
+      "command": "uv",
+      "args": ["run", "--quiet", "--project", "${CLAUDE_PLUGIN_ROOT}", "committee", "mcp"]
+    }
+  }
+}

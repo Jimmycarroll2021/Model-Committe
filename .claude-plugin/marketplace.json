@@ -1,0 +1,20 @@
+{
+  "name": "model-committee",
+  "owner": {
+    "name": "Jimmy Carroll"
+  },
+  "metadata": {
+    "description": "Model Committee: fan-out/fan-in multi-model research as a Claude Code skill, slash command and MCP server",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "model-committee",
+      "source": "./",
+      "description": "Ask 2-8 independent model agents the same question in parallel and get a synthesis of agreement, disagreement and unique findings.",
+      "version": "0.1.0",
+      "keywords": ["multi-model", "research", "committee", "second-opinion", "synthesis", "mcp"],
+      "category": "productivity"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "model-committee",
+  "version": "0.1.0",
+  "description": "Ask 2-8 independent model agents (Claude Code, Codex, agy, Ollama, APIs) the same question in parallel and get a synthesis of agreement, disagreement and unique findings.",
+  "author": {
+    "name": "Jimmy Carroll"
+  },
+  "homepage": "https://github.com/Jimmycarroll2021/Model-Committe#readme",
+  "repository": "https://github.com/Jimmycarroll2021/Model-Committe",
+  "keywords": ["multi-model", "research", "committee", "second-opinion", "synthesis", "mcp"]
+}
