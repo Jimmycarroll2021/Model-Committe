@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Model Committee</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#run-view">Skip to run</a>
+<header class="masthead">
+  <h1>Model Committee</h1>
+  <p class="tagline">Several models research one question independently. A synthesizer maps where they agree, where they split, and what only one of them found.</p>
+</header>
+
+<main class="layout">
+  <section class="panel compose" aria-labelledby="compose-title">
+    <h2 id="compose-title">New run</h2>
+    <form id="run-form" novalidate>
+      <div class="field">
+        <label for="objective">Question or objective</label>
+        <textarea id="objective" name="objective" rows="4" required minlength="3"
+          placeholder="e.g. Should a five-person SaaS team move from Heroku to Fly.io, Render or AWS in 2027?"></textarea>
+      </div>
+
+      <div class="field">
+        <label for="criteria">Decision criteria <span class="opt">optional, one per line</span></label>
+        <textarea id="criteria" name="criteria" rows="3" placeholder="Monthly cost under $500&#10;No dedicated ops hire"></textarea>
+      </div>
+
+      <div class="field">
+        <label for="context-files">Context files <span class="opt">optional, every member gets the same files</span></label>
+        <input type="file" id="context-files" multiple aria-describedby="context-hint"
+          accept=".pdf,.xlsx,.xlsm,.txt,.md,.markdown,.csv,.tsv,.json,.yaml,.yml,.xml,.html,.htm,.py,.js,.ts,.sql,.log,.rst,.ini,.toml">
+        <p class="hint" id="context-hint">PDF, spreadsheet or text, up to 20 MB each.</p>
+        <ul id="context-list" class="context-list" aria-live="polite"></ul>
+      </div>
+
+      <fieldset class="field committee">
+        <legend>Committee members</legend>
+        <p class="hint" id="models-hint">Pick 2 to 8 models. Edit a spec to choose a specific model, e.g. <code>agy:gpt-oss-120b-medium</code>.</p>
+        <ul id="model-list" class="model-list" aria-describedby="models-hint"></ul>
+        <div class="committee-foot">
+          <button type="button" id="add-model" class="btn-quiet">Add a model</button>
+          <span id="model-count" class="count" aria-live="polite"></span>
+        </div>
+        <datalist id="spec-options"></datalist>
+      </fieldset>
+
+      <div class="field">
+        <label for="synthesizer">Synthesizer</label>
+        <select id="synthesizer" name="synthesizer"></select>
+      </div>
+
+      <fieldset class="field">
+        <legend>Depth</legend>
+        <div class="segmented">
+          <input type="radio" name="depth" id="depth-brief" value="brief"><label for="depth-brief">Brief</label>
+          <input type="radio" name="depth" id="depth-standard" value="standard" checked><label for="depth-standard">Standard</label>
+          <input type="radio" name="depth" id="depth-detailed" value="detailed"><label for="depth-detailed">Detailed</label>
+        </div>
+      </fieldset>
+
+      <div class="field">
+        <label for="deliverable">Deliverable</label>
+        <select id="deliverable" name="deliverable">
+          <option value="none">Synthesis and member reports only</option>
+          <option value="report" selected>HTML report</option>
+          <option value="spreadsheet">Spreadsheet (claim matrix)</option>
+          <option value="deck">Slide deck</option>
+          <option value="all">All of the above</option>
+        </select>
+      </div>
+
+      <div class="row-2">
+        <div class="field">
+          <label for="join">Wait for</label>
+          <select id="join" name="join">
+            <option value="all" selected>Every member</option>
+            <option value="quorum">A quorum</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="min-members">Minimum successful</label>
+          <input id="min-members" name="min_members" type="number" min="1" max="8" value="2" inputmode="numeric">
+        </div>
+      </div>
+
+      <div class="field check">
+        <input type="checkbox" id="verify-sources" name="verify_sources">
+        <label for="verify-sources">Fetch cited sources and check quoted passages</label>
+      </div>
+
+      <div id="form-error" class="form-error" role="alert" hidden></div>
+      <button type="submit" id="start" class="btn-primary">Start run</button>
+    </form>
+  </section>
+
+  <section id="run-view" class="panel run" aria-labelledby="run-title" tabindex="-1">
+    <div id="run-empty" class="empty">
+      <h2 id="run-title-empty">No run selected</h2>
+      <p>Start a run, or open one from your history. Progress for each member appears here as it happens.</p>
+    </div>
+    <div id="run-body" hidden>
+      <div class="run-head">
+        <div>
+          <h2 id="run-title"></h2>
+          <p class="run-meta"><span id="run-status" class="pill"></span> <span id="run-id"></span> <span id="run-elapsed" class="num"></span></p>
+        </div>
+        <button type="button" id="cancel" class="btn-quiet danger" hidden>Cancel run</button>
+      </div>
+
+      <ol id="stages" class="stages" aria-label="Run stages"></ol>
+
+      <h3 class="sub">Members</h3>
+      <ul id="members" class="members"></ul>
+
+      <div id="run-error" class="run-error" role="alert" hidden></div>
+
+      <div id="outputs" hidden>
+        <a id="open-report" class="btn-primary report-link" target="_blank" rel="noopener noreferrer" hidden>Open report</a>
+        <h3 class="sub">Files</h3>
+        <ul id="artifacts" class="artifacts"></ul>
+      </div>
+
+      <section id="synthesis" class="synthesis" aria-labelledby="synthesis-title" hidden>
+        <h3 id="synthesis-title" class="sub">Synthesis</h3>
+        <div id="synthesis-body" class="md"></div>
+      </section>
+
+      <details class="log">
+        <summary>Event log</summary>
+        <ol id="event-log"></ol>
+      </details>
+    </div>
+    <p id="announcer" class="visually-hidden" aria-live="polite"></p>
+  </section>
+
+  <section class="panel history" aria-labelledby="history-title">
+    <div class="history-head">
+      <h2 id="history-title">History</h2>
+      <button type="button" id="refresh-history" class="btn-quiet">Refresh</button>
+    </div>
+    <ul id="history" class="history-list"></ul>
+  </section>
+</main>
+</body>
+</html>
