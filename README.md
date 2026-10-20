@@ -170,24 +170,29 @@ with criteria, checks `committee providers`, launches the run in the background 
 agreement, disagreements with cause, unique findings, warnings and artifact paths. The plugin also starts
 the MCP server below, so its tools are available too.
 
-Runs go to `$MODEL_COMMITTEE_RUNS_DIR`, else `runs/` inside the checkout the plugin runs from. An installed
-plugin lives in Claude Code's plugin cache, which plugin updates replace, so set `MODEL_COMMITTEE_RUNS_DIR`
-to keep runs.
+Runs go to `$MODEL_COMMITTEE_RUNS_DIR`, else `runs/` inside the checkout the plugin runs from (else
+`~/.model-committee/runs`). An installed plugin lives in Claude Code's plugin cache, which plugin updates
+replace, so set `MODEL_COMMITTEE_RUNS_DIR` to keep runs.
 
 ### MCP server
 
-`committee mcp` starts an MCP server on stdio with five tools:
+`committee mcp` starts an MCP server on stdio with six tools:
 
 | Tool | Does |
 |---|---|
 | `committee_providers` | Lists backends and whether each is usable here, plus the default lineup. |
-| `committee_run` | Starts a run in the background (objective, models, depth, deliverable, criteria, synthesizer, join, min_members, context_paths, verify_sources) and returns `run_id` and the run directory within a few seconds. |
+| `committee_run` | Checks the configuration and that every chosen backend is usable (errors come back at once, nothing is launched), then starts the run as a separate process (objective, models, depth, deliverable, criteria, synthesizer, join, min_members, context_paths, verify_sources) and returns `run_id` and the run directory within a few seconds. |
 | `committee_status` | Run status, member statuses and durations, last progress events. |
 | `committee_result` | When finished: synthesis markdown, validation warnings, untraceable citations, artifact paths. |
+| `committee_cancel` | Stops a running run and the member CLIs it started. |
 | `committee_list_runs` | Recent runs, newest first. |
 
-Runs execute inside the server process: if the client shuts the server down mid-run, the run is recorded as
-failed (cancelled). Use the CLI for runs that must outlive the client session.
+Each run executes in its own detached process, so it keeps going when the MCP server or the client session
+exits; any later server (or the CLI, or the web UI) can follow it from the run directory. A run whose
+process dies before finishing (killed, machine restarted) is reported as `failed` with an `interrupted`
+error instead of staying `running`. On Windows this also holds for clients that put their MCP servers in a
+kill-on-close Job Object that forbids breakaway (the MCP Python SDK's stdio client, Claude Code's shell): the
+launcher detects that the child is still inside a job and starts it through WMI instead, outside the job.
 
 Register it with each client (replace `/path/to/model-committee` with your checkout):
 

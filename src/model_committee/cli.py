@@ -5,13 +5,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
 from model_committee.router import infer_deliverable, infer_depth
 from model_committee.schemas import MAX_MEMBERS, MIN_MEMBERS, Deliverable, Depth, Event, JoinPolicy, RunConfig
 
-DEFAULT_RUNS_DIR = "runs"
+DEFAULT_RUNS_DIR = None  # -> artifacts.default_runs_dir()
 
 
 def _out(text: str = "") -> None:
@@ -68,7 +69,7 @@ async def _cmd_run(args) -> int:
     )
     _out(f"committee: {len(config.models)} members ({', '.join(config.models)}), synthesizer {config.synthesizer}, "
          f"depth {config.depth.value}, deliverable {config.deliverable.value}")
-    result = await run_committee(config, runs_root=Path(args.runs_dir), on_event=None if args.quiet else _print_event)
+    result = await run_committee(config, runs_root=_runs_dir(args), on_event=None if args.quiet else _print_event)
     m = result.manifest
     _out()
     _out(f"run {m.run_id}: {m.status} in {m.timings.get('total_s', 0):.0f}s -> {result.run_dir}")
@@ -104,8 +105,35 @@ async def _cmd_verify(args) -> int:
 def _cmd_serve(args) -> int:
     from model_committee.server import serve
 
-    serve(host=args.host, port=args.port, runs_root=Path(args.runs_dir), allow_remote=args.allow_remote)
+    _out(f"runs: {_runs_dir(args)}")
+    serve(host=args.host, port=args.port, runs_root=_runs_dir(args), allow_remote=args.allow_remote)
     return 0
+
+
+async def _cmd_exec(args) -> int:
+    """Internal: body of a detached run started by the web UI or MCP server (see launcher.py)."""
+    if args.log:  # WMI-launched: no inherited stdout/stderr, so point both at the launch log ourselves
+        fd = os.open(args.log, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+        os.dup2(fd, 1)
+        os.dup2(fd, 2)
+        sys.stdout = open(1, "w", encoding="utf-8", errors="replace", buffering=1, closefd=False)  # noqa: SIM115
+        sys.stderr = open(2, "w", encoding="utf-8", errors="replace", buffering=1, closefd=False)  # noqa: SIM115
+    if args.env_file:  # WMI-launched: restore the launcher's environment, then remove the copy from disk
+        env_path = Path(args.env_file)
+        os.environ.clear()
+        os.environ.update(json.loads(env_path.read_text(encoding="utf-8")))
+        env_path.unlink(missing_ok=True)
+    from model_committee.orchestrator import run_committee
+
+    config = RunConfig.model_validate_json(Path(args.config).read_text(encoding="utf-8"))
+    result = await run_committee(config, runs_root=_runs_dir(args), run_id=args.run_id)
+    return 0 if result.manifest.status == "succeeded" else 1
+
+
+def _runs_dir(args) -> Path:
+    from model_committee.artifacts import default_runs_dir
+
+    return Path(args.runs_dir) if args.runs_dir else default_runs_dir()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -144,6 +172,13 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--allow-remote", action="store_true",
                        help="allow a non-loopback --host (needs MODEL_COMMITTEE_TOKEN, sent as a bearer token)")
 
+    exe = sub.add_parser("exec", help=argparse.SUPPRESS)  # internal: detached run body (launcher.py)
+    exe.add_argument("--config", required=True)
+    exe.add_argument("--run-id", required=True)
+    exe.add_argument("--runs-dir", default=DEFAULT_RUNS_DIR)
+    exe.add_argument("--log", default=None)
+    exe.add_argument("--env-file", default=None)
+
     sub.add_parser("mcp", help="start the MCP server on stdio (runs dir: $MODEL_COMMITTEE_RUNS_DIR or <repo>/runs)")
     return parser
 
@@ -160,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
 
         mcp_main()
         return 0
-    handler = {"providers": _cmd_providers, "run": _cmd_run, "verify": _cmd_verify}[args.command]
+    handler = {"providers": _cmd_providers, "run": _cmd_run, "verify": _cmd_verify, "exec": _cmd_exec}[args.command]
     try:
         return asyncio.run(handler(args))
     except KeyboardInterrupt:

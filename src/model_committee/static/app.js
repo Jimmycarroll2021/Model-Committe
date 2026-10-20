@@ -9,7 +9,7 @@
   ];
   const STATUS_TEXT = {
     pending: "Pending", running: "Running", succeeded: "Succeeded", failed: "Failed",
-    timed_out: "Timed out", skipped: "Skipped", cancelled: "Cancelled",
+    timed_out: "Timed out", skipped: "Skipped", cancelled: "Cancelled", interrupted: "Interrupted",
   };
   const STAGE_TEXT = { pending: "Waiting", running: "In progress", done: "Done", failed: "Failed", skipped: "Skipped" };
 
@@ -109,6 +109,15 @@
     const t = parseTs(ts);
     if (t === null) return "";
     return new Date(t).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  }
+
+  // A failed run whose process died (server or CLI exited) is "interrupted", one the user stopped is
+  // "cancelled"; both arrive as status "failed" with a telling error.
+  function displayStatus(status, error) {
+    if (status !== "failed" || typeof error !== "string") return status;
+    if (error.startsWith("interrupted")) return "interrupted";
+    if (error === "cancelled by user" || error === "cancelled") return "cancelled";
+    return status;
   }
 
   function pill(status) {
@@ -358,7 +367,7 @@
 
   function mergeManifest(run, m) {
     run.manifest = m;
-    if (!(run.status === "cancelled" && m.status === "failed")) run.status = m.status || run.status;
+    if (!(run.status === "cancelled" && m.status === "failed")) run.status = displayStatus(m.status, m.error) || run.status;
     run.startedAt = parseTs(m.created_at) || run.startedAt;
     run.finishedAt = parseTs(m.finished_at) || run.finishedAt;
     if (m.error) run.error = m.error;
@@ -429,7 +438,7 @@
       case "run.failed": {
         const failed = ev.type === "run.failed";
         const cancelled = ev.status === "cancelled" || ev.detail === "cancelled";
-        run.status = failed ? (cancelled ? "cancelled" : "failed") : (ev.status || "succeeded");
+        run.status = failed ? (cancelled ? "cancelled" : displayStatus("failed", ev.detail)) : (ev.status || "succeeded");
         if (failed && ev.detail) run.error = ev.detail;
         run.finishedAt = ts;
         run.ended = true;
@@ -493,9 +502,9 @@
       cards.push(el("li", { class: "member s-" + (mem.status || "pending"), "data-key": mem.key },
         el("span", { class: "spec", text: mem.spec || mem.key }),
         showLabel ? el("span", { class: "label", text: mem.label }) : null,
-        el("div", { class: "line" }, pill(mem.status), el("span", { class: "elapsed", "data-elapsed": mem.key })),
+        el("div", { class: "line" }, pill(displayStatus(mem.status, mem.error)), el("span", { class: "elapsed", "data-elapsed": mem.key })),
         mem.note && mem.status === "running" ? el("p", { class: "note", text: mem.note }) : null,
-        mem.error ? el("p", { class: "err", text: mem.error }) : null));
+        mem.error && displayStatus(mem.status, mem.error) === mem.status ? el("p", { class: "err", text: mem.error }) : null));
     }
     for (const spec of run.placeholders) {
       cards.push(el("li", { class: "member s-pending" }, el("span", { class: "spec", text: spec }),
@@ -663,7 +672,7 @@
         type: "button", "data-run": r.run_id, onclick: () => openRun(r.run_id, true),
       },
       el("span", { class: "obj", text: r.objective || r.run_id }),
-      el("span", { class: "meta" }, pill(r.status), el("span", { text: fmtDate(r.created_at) }),
+      el("span", { class: "meta" }, pill(displayStatus(r.status, r.error)), el("span", { text: fmtDate(r.created_at) }),
         n ? el("span", { text: ok + "/" + n + " members succeeded" }) : null)));
     }));
     markCurrentHistory();

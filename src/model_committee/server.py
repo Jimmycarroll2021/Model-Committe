@@ -24,13 +24,16 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from model_committee.artifacts import new_run_id
+from model_committee import launcher
+from model_committee.artifacts import default_runs_dir, new_run_id, reconcile_interrupted
 from model_committee.schemas import MAX_MEMBERS, MIN_MEMBERS, Event, RunConfig
 
 STATIC_DIR = Path(__file__).parent / "static"
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 TERMINAL_EVENTS = {"run.finished", "run.failed"}
 POLL_INTERVAL_S = 0.2
+OWNER_CHECK_S = 1.0  # how often a live SSE stream checks whether a detached run's process is still alive
+LAUNCH_TIMEOUT_S = 30.0
 KEEPALIVE_S = 15.0
 
 ARTIFACT_CSP = (
@@ -113,6 +116,17 @@ def _read_json(path: Path) -> dict | None:
         return None
 
 
+def _read_manifest(run_dir: Path) -> dict | None:
+    """Manifest as JSON, reconciled: a "running" run whose owner process died is reported (and recorded)
+    as failed/interrupted, so a run never stays "running" after the server or CLI that ran it is gone."""
+    if not (run_dir / "run-manifest.json").exists():
+        return None
+    try:
+        return reconcile_interrupted(run_dir).model_dump(mode="json")
+    except (OSError, ValueError):
+        return _read_json(run_dir / "run-manifest.json")  # half-written or older schema: show it as-is
+
+
 def _hostname(netloc: str) -> str:
     netloc = netloc.split("/", 1)[0].lower()
     if netloc.startswith("["):
@@ -189,7 +203,7 @@ def create_app(
         return runs_root / run_id
 
     def load_manifest(run_id: str) -> dict:
-        manifest = _read_json(run_dir(run_id) / "run-manifest.json")
+        manifest = _read_manifest(run_dir(run_id))
         if manifest is None:
             handle = handles.get(run_id)
             if handle is not None:
@@ -280,15 +294,18 @@ def create_app(
         if config.context_paths:
             inbox.mkdir(parents=True, exist_ok=True)
             config = config.model_copy(update={"context_paths": resolve_context(config.context_paths)})
-        try:
-            runner = _run_committee()
-        except ImportError as exc:
-            raise HTTPException(503, f"orchestrator unavailable: {exc}") from exc
         base = new_run_id(config.objective)
         run_id, n = base, 1
         while run_id in handles or (runs_root / run_id).exists():
             n += 1
             run_id = f"{base}-{n}"
+        if run_committee is None and provider_factory is None:
+            return await _launch_detached(config, run_id)
+        # In-process path: only for the test hook / an injected provider factory (not picklable to a child).
+        try:
+            runner = _run_committee()
+        except ImportError as exc:
+            raise HTTPException(503, f"orchestrator unavailable: {exc}") from exc
 
         async def _go() -> None:
             await runner(config, runs_root=runs_root, on_event=None, provider_factory=provider_factory,
@@ -308,6 +325,21 @@ def create_app(
         task.add_done_callback(_done)
         return {"run_id": run_id}
 
+    async def _launch_detached(config: RunConfig, run_id: str) -> dict:
+        """Run in a detached child process so the run survives this server exiting."""
+        try:
+            pid = await asyncio.to_thread(launcher.launch_detached, config, runs_root=runs_root, run_id=run_id)
+        except OSError as exc:
+            raise HTTPException(500, f"could not start the run process: {exc}") from exc
+        started = await asyncio.to_thread(launcher.wait_for_run_dir, runs_root, run_id, pid, LAUNCH_TIMEOUT_S)
+        if not started:
+            # Timed out while still alive and no manifest yet, so no owner_pid: kill the launch PID's tree
+            # (on Windows that is the venv launcher; /T takes the real interpreter with it).
+            await asyncio.to_thread(launcher.cancel_detached, pid, None)
+            tail = launcher.launch_log(runs_root, run_id)[-2000:].strip()
+            raise HTTPException(500, f"the run process exited before starting the run:\n{tail or '(no output)'}")
+        return {"run_id": run_id, "pid": pid}
+
     @app.get("/api/runs")
     async def list_runs() -> list[dict]:
         rows: list[dict] = []
@@ -315,7 +347,7 @@ def create_app(
         for child in runs_root.iterdir():
             if not child.is_dir() or not RUN_ID_RE.fullmatch(child.name):
                 continue
-            manifest = _read_json(child / "run-manifest.json")
+            manifest = _read_manifest(child)
             if manifest is None:
                 continue
             seen.add(child.name)
@@ -324,6 +356,7 @@ def create_app(
                 "run_id": child.name,
                 "objective": config.get("objective", ""),
                 "status": effective_status(child.name, manifest),
+                "error": manifest.get("error"),
                 "created_at": manifest.get("created_at"),
                 "finished_at": manifest.get("finished_at"),
                 "members": [
@@ -333,8 +366,9 @@ def create_app(
             })
         for run_id in handles:
             if run_id not in seen:
+                info = load_manifest(run_id)
                 rows.append({"run_id": run_id, "objective": "", "created_at": None, "finished_at": None,
-                             "status": load_manifest(run_id)["status"], "members": []})
+                             "status": info["status"], "error": info.get("error"), "members": []})
         rows.sort(key=lambda r: (r["created_at"] or "9999", r["run_id"]), reverse=True)
         return rows
 
@@ -349,14 +383,28 @@ def create_app(
 
     @app.post("/api/runs/{run_id}/cancel")
     async def cancel_run(run_id: str) -> dict:
-        run_dir(run_id)
+        directory = run_dir(run_id)
         handle = handles.get(run_id)
-        if handle is None:
-            raise HTTPException(404, "run not started by this server")
-        if handle.task.done():
+        if handle is not None and not handle.task.done():
+            handle.cancelled = True
+            handle.task.cancel()
+            return {"run_id": run_id, "cancelled": True}
+        manifest = _read_manifest(directory)
+        if manifest is None and handle is None:
+            raise HTTPException(404, "run not found")
+        if manifest is None or manifest.get("status") != "running" or handle is not None:
             return {"run_id": run_id, "cancelled": False, "detail": "run already finished"}
-        handle.cancelled = True
-        handle.task.cancel()
+        pid = manifest.get("owner_pid")
+        if not isinstance(pid, int) or pid == os.getpid():
+            # No recorded owner (older run), or it runs inside this very process: never kill ourselves.
+            raise HTTPException(409, "this run has no separate process that can be cancelled")
+        if not await asyncio.to_thread(launcher.cancel_detached, pid, directory):
+            _read_manifest(directory)  # the owner was already gone: record it as interrupted
+            return {"run_id": run_id, "cancelled": False, "detail": "run process had already exited"}
+        for _ in range(25):  # let the kill land, then record the cancellation in the manifest + events
+            if _read_manifest(directory).get("status") != "running":
+                break
+            await asyncio.sleep(0.2)
         return {"run_id": run_id, "cancelled": True}
 
     @app.get("/api/runs/{run_id}/events")
@@ -378,7 +426,7 @@ def create_app(
         """Replay events.jsonl, then follow it until a terminal event (or the run stops without one)."""
         path = directory / "events.jsonl"
         offset, count, buf = 0, 0, b""
-        idle = 0.0
+        idle = owner_idle = 0.0
         while True:
             chunk = b""
             if path.exists():
@@ -403,7 +451,10 @@ def create_app(
             if chunk:
                 idle = 0.0
                 continue
-            if _finished_without_terminal(directory, run_id):
+            check_owner = owner_idle <= 0
+            if check_owner:
+                owner_idle = OWNER_CHECK_S
+            if check_owner and _finished_without_terminal(directory, run_id):
                 # Drain anything written between our read and the check, then close with a synthetic end.
                 if path.exists() and path.stat().st_size > offset:
                     continue
@@ -412,6 +463,7 @@ def create_app(
             if await request.is_disconnected():
                 return
             await asyncio.sleep(POLL_INTERVAL_S)
+            owner_idle -= POLL_INTERVAL_S
             idle += POLL_INTERVAL_S
             if idle >= KEEPALIVE_S:
                 idle = 0.0
@@ -421,7 +473,7 @@ def create_app(
         handle = handles.get(run_id)
         if handle is not None:
             return handle.task.done()
-        manifest = _read_json(directory / "run-manifest.json")
+        manifest = _read_manifest(directory)  # reconciling appends run.failed for a dead owner
         return manifest is not None and manifest.get("status", "running") != "running"
 
     def _synthetic_end(run_id: str) -> dict:
@@ -463,7 +515,7 @@ def create_app(
 def serve(
     host: str = "127.0.0.1",
     port: int = 8765,
-    runs_root: Path | str = "runs",
+    runs_root: Path | str | None = None,
     *,
     allow_remote: bool = False,
 ) -> None:
@@ -475,7 +527,7 @@ def serve(
     uvicorn.run(app, host=host, port=port)
 
 
-def build_app(host: str, runs_root: Path | str, *, allow_remote: bool = False) -> FastAPI:
+def build_app(host: str, runs_root: Path | str | None = None, *, allow_remote: bool = False) -> FastAPI:
     """Apply the bind policy: loopback is open (token optional); anything else needs allow_remote + a token."""
     token = os.environ.get(TOKEN_ENV, "").strip() or None
     extra: set[str] = set()
@@ -487,4 +539,5 @@ def build_app(host: str, runs_root: Path | str, *, allow_remote: bool = False) -
             )
         bare = host.strip("[]")
         extra = {"*"} if bare in ("0.0.0.0", "::") else {bare}
-    return create_app(Path(runs_root), extra_hosts=extra, token=token)
+    root = Path(runs_root) if runs_root is not None else default_runs_dir()
+    return create_app(root, extra_hosts=extra, token=token)

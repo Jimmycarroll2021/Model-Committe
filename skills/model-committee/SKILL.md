@@ -75,8 +75,11 @@ to complete; do not poll in a loop. The final output line reads
 `run <run_id>: <succeeded|failed> in <N>s -> <run_dir>`, followed by member statuses.
 
 When the plugin's MCP tools are loaded (`committee_providers`, `committee_run`, `committee_status`,
-`committee_result`), they are an alternative to the CLI: `committee_run` returns a run_id at once; poll
-`committee_status` every 30-60 s and call `committee_result` once the status is not `running`.
+`committee_result`, `committee_cancel`), they are an alternative to the CLI: `committee_run` reports
+unavailable backends at once without launching, otherwise it starts the run as a separate process and
+returns a run_id. The run keeps going if the session ends; poll `committee_status` every 30-60 s and call
+`committee_result` once the status is not `running`. A run reported `failed` with an `interrupted` error
+lost its process; rerun it. Use `committee_cancel` only when the user asks to stop a run.
 
 ## Step 4: read the results
 

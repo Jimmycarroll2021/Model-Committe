@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from model_committee.artifacts import RunStore, new_run_id
+from model_committee.artifacts import RunStore, new_run_id, process_started
 from model_committee.context import ContextBundle, load_context
 from model_committee.depth import budget_for
 from model_committee.guard import ensure_not_member
@@ -59,7 +60,8 @@ async def run_committee(
 ) -> RunResult:
     ensure_not_member()  # single choke point for CLI, web UI, MCP and skill entry points
     factory = provider_factory or _default_factory
-    manifest = RunManifest(run_id=run_id or new_run_id(config.objective), config=config)
+    manifest = RunManifest(run_id=run_id or new_run_id(config.objective), config=config,
+                           owner_pid=os.getpid(), owner_started=process_started(os.getpid()))
     store = RunStore(Path(runs_root), manifest)
 
     def emit(event: Event) -> None:

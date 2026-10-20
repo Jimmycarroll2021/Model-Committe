@@ -287,6 +287,10 @@ class RunManifest(BaseModel):
     artifacts: list[ArtifactRecord] = Field(default_factory=list)
     error: str | None = None
     timings: dict[str, float] = Field(default_factory=dict)
+    # The process executing the run. If it is gone while status is still "running", the run was interrupted
+    # (killed, crashed, machine slept) and readers report it as failed rather than running forever.
+    owner_pid: int | None = None
+    owner_started: float | None = None  # owner's process creation time (epoch s), guards against PID reuse
 
 
 class Event(BaseModel):

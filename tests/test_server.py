@@ -476,3 +476,137 @@ def test_serve_accepts_allow_remote_kwarg():
     assert inspect.signature(server.serve).parameters["allow_remote"].default is False
     assert server.is_loopback("127.0.0.1") and server.is_loopback("::1") and server.is_loopback("localhost")
     assert not server.is_loopback("0.0.0.0") and not server.is_loopback("192.168.1.20")
+
+
+# ---------------------------------------------------------------- detached runs + interrupted reconciliation
+
+
+def _dead_pid() -> int:
+    """A PID with no live process (cheaper and steadier than spawning one and waiting for it to exit)."""
+    from model_committee.artifacts import process_started
+
+    pid = 4_000_000
+    while process_started(pid) is not None:
+        pid -= 4
+    return pid
+
+
+def _wait_status(client: TestClient, run_id: str, done, timeout: float) -> dict:
+    deadline = time.monotonic() + timeout
+    body: dict = {}
+    while time.monotonic() < deadline:
+        resp = client.get(f"/api/runs/{run_id}")
+        if resp.status_code == 200:
+            body = resp.json()
+            if done(body):
+                return body
+        time.sleep(0.2)
+    raise AssertionError(f"run {run_id} never finished: {body.get('status')} {body.get('error')}")
+
+
+def test_real_detached_launch_survives_outside_server(runs_root: Path, monkeypatch: pytest.MonkeyPatch):
+    import os
+
+    for var in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "MODEL_COMMITTEE_MEMBER"):
+        monkeypatch.delenv(var, raising=False)
+    assert server.run_committee is None  # default path: no in-process hook
+    with TestClient(server.create_app(runs_root)) as c:
+        payload = {"objective": "Detached launch check", "models": ["openai:x", "anthropic:y"]}
+        resp = c.post("/api/runs", json=payload)
+        assert resp.status_code == 202, resp.text
+        run_id, pid = resp.json()["run_id"], resp.json()["pid"]
+        assert pid != os.getpid()
+        manifest = _wait_status(c, run_id, lambda m: m["status"] != "running", timeout=90)
+        # The run's owner is the child (on Windows the venv launcher may sit between, so not always == pid).
+        assert manifest["owner_pid"] not in (None, os.getpid())
+        assert manifest["status"] == "failed"
+        assert "not available" in manifest["error"]
+        events = _sse_events(c, run_id)
+        assert events[0]["type"] == "run.started" and events[-1]["type"] == "run.failed"
+
+
+def test_detached_launch_failure_returns_log_tail(runs_root: Path, monkeypatch: pytest.MonkeyPatch):
+    from model_committee import launcher
+
+    def fake_launch(config, *, runs_root, run_id):
+        log = Path(runs_root) / launcher.LAUNCH_DIR / f"{run_id}.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("Traceback ...\nModuleNotFoundError: no module named 'boom'\n", encoding="utf-8")
+        return _dead_pid()
+
+    monkeypatch.setattr(launcher, "launch_detached", fake_launch)
+    with TestClient(server.create_app(runs_root)) as c:
+        resp = c.post("/api/runs", json={"objective": "Broken launch", "models": MODELS})
+        assert resp.status_code == 500
+        assert "no module named 'boom'" in resp.json()["detail"]
+
+
+def _running_manifest(runs_root: Path, run_id: str, owner_pid: int, owner_started: float | None) -> Path:
+    run_dir = runs_root / run_id
+    run_dir.mkdir(parents=True)
+    members = [MemberReport(key="m1-claude-cli", spec="claude-cli", label="c", vendor="v",
+                            status=MemberStatus.running)]
+    manifest = RunManifest(run_id=run_id, config=RunConfig(objective="Orphaned run", models=MODELS[:2]),
+                           members=members, owner_pid=owner_pid, owner_started=owner_started)
+    (run_dir / "run-manifest.json").write_text(manifest.model_dump_json(), encoding="utf-8")
+    _write_events(run_dir, [Event(type="run.started"), Event(type="member.started", member="m1-claude-cli")])
+    return run_dir
+
+
+def test_dead_owner_reported_as_interrupted(client: TestClient, runs_root: Path):
+    run_id = "20261021-000000-orphaned"
+    _running_manifest(runs_root, run_id, _dead_pid(), 1.0)
+    got = client.get(f"/api/runs/{run_id}").json()
+    assert got["status"] == "failed"
+    assert got["error"].startswith("interrupted")
+    assert got["members"][0]["status"] == "failed"
+    row = next(r for r in client.get("/api/runs").json() if r["run_id"] == run_id)
+    assert row["status"] == "failed" and row["error"].startswith("interrupted")
+    events = _sse_events(client, run_id)
+    assert [e["type"] for e in events] == ["run.started", "member.started", "run.failed"]
+    assert events[-1]["detail"].startswith("interrupted")
+
+
+def test_sse_closes_when_owner_dies_mid_stream(client: TestClient, runs_root: Path):
+    """A stream opened while the run looks alive must still end once its process is gone."""
+    run_id = "20261021-000001-dies-mid-stream"
+    _running_manifest(runs_root, run_id, _dead_pid(), 1.0)
+    events = _sse_events(client, run_id)
+    assert events[-1]["type"] == "run.failed"
+
+
+def test_cancel_on_disk_run_kills_owner(client: TestClient, runs_root: Path):
+    import subprocess
+    import sys
+
+    from model_committee.artifacts import process_started
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    try:
+        deadline = time.monotonic() + 10
+        while process_started(proc.pid) is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        run_id = "20261021-000002-cancel-me"
+        _running_manifest(runs_root, run_id, proc.pid, process_started(proc.pid))
+        assert client.get(f"/api/runs/{run_id}").json()["status"] == "running"
+        resp = client.post(f"/api/runs/{run_id}/cancel")
+        assert resp.status_code == 200 and resp.json()["cancelled"] is True
+        proc.wait(timeout=10)
+        got = client.get(f"/api/runs/{run_id}").json()
+        assert got["status"] == "failed" and got["error"] == "cancelled by user"
+        assert _sse_events(client, run_id)[-1]["detail"] == "cancelled by user"
+        assert client.post(f"/api/runs/{run_id}/cancel").json()["cancelled"] is False
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_cancel_refuses_to_kill_the_server_itself(client: TestClient, runs_root: Path):
+    import os
+
+    from model_committee.artifacts import process_started
+
+    run_id = "20261021-000003-own-pid"
+    _running_manifest(runs_root, run_id, os.getpid(), process_started(os.getpid()))
+    assert client.post(f"/api/runs/{run_id}/cancel").status_code == 409
+    assert client.get(f"/api/runs/{run_id}").json()["status"] == "running"

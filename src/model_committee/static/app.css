@@ -14,6 +14,7 @@
   --failed: #b3261e;
   --timed-out: #8a4a00;
   --skipped: #6b7280;
+  --interrupted: #7a5a1e;
   --radius-lg: 10px;
   --radius-sm: 6px;
   --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Roboto, sans-serif;
@@ -38,6 +39,7 @@
     --failed: #f2857d;
     --timed-out: #e09a4f;
     --skipped: #9aa1ad;
+    --interrupted: #d4b06a;
     color-scheme: dark;
   }
 }
@@ -233,6 +235,7 @@ form .btn-primary { width: 100%; }
 .s-running { color: var(--running); }
 .s-succeeded { color: var(--succeeded); }
 .s-failed, .s-cancelled { color: var(--failed); }
+.s-interrupted { color: var(--interrupted); }
 .s-timed_out { color: var(--timed-out); }
 .s-skipped { color: var(--skipped); }
 .s-running.pill::before { animation: pulse 1.4s ease-in-out infinite; }
@@ -267,6 +270,7 @@ form .btn-primary { width: 100%; }
 .member.s-running { border-left-color: var(--running); }
 .member.s-succeeded { border-left-color: var(--succeeded); }
 .member.s-failed { border-left-color: var(--failed); }
+.member.s-interrupted, .member.s-cancelled { border-left-color: var(--interrupted); }
 .member.s-timed_out { border-left-color: var(--timed-out); }
 .member.s-skipped { border-left-color: var(--skipped); }
 .member .spec { font-family: var(--mono); font-size: 0.84rem; color: var(--ink); overflow-wrap: anywhere; display: block; }
