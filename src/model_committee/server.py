@@ -10,6 +10,7 @@ model-generated, so artifacts are only served when the manifest lists them, with
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -21,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from model_committee import launcher
@@ -172,6 +173,15 @@ def create_app(
     app.state.handles = handles
 
     @app.middleware("http")
+    async def _no_stale_ui(request: Request, call_next):
+        # Without this, browsers heuristically cache app.js/app.css and keep running an old UI after an
+        # upgrade. no-cache still allows the cheap ETag revalidation (304).
+        response = await call_next(request)
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+    @app.middleware("http")
     async def _local_only(request: Request, call_next):
         # DNS-rebinding / cross-site guard: this server launches model CLIs, so only same-host callers.
         # "*" (wildcard bind with a token) skips the host checks; the token is the control there.
@@ -224,8 +234,14 @@ def create_app(
     # ------------------------------------------------------------------ UI
 
     @app.get("/", include_in_schema=False)
-    async def index() -> FileResponse:
-        return FileResponse(STATIC_DIR / "index.html", headers={"Content-Security-Policy": UI_CSP})
+    async def index() -> Response:
+        # Version the asset URLs by content, so a browser holding an old app.js from before an upgrade
+        # fetches the new one instead of running a stale UI.
+        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        for name in ("app.js", "app.css"):
+            digest = hashlib.sha256((STATIC_DIR / name).read_bytes()).hexdigest()[:10]
+            html = html.replace(f"/static/{name}", f"/static/{name}?v={digest}")
+        return Response(html, media_type="text/html; charset=utf-8", headers={"Content-Security-Policy": UI_CSP})
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 

@@ -652,3 +652,25 @@ def test_member_findings_and_synthesis_json_reach_the_ui(client: TestClient, run
     resp = client.get(f"/api/runs/{run_id}/files/synthesis.json")
     assert resp.status_code == 200 and resp.headers["content-type"].startswith("application/json")
     assert resp.json()["answer_tally"] == {"B": [m.key for m in manifest.members]}
+
+
+def test_ui_assets_are_revalidated_not_heuristically_cached(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from model_committee.server import create_app
+
+    client = TestClient(create_app(tmp_path), base_url="http://127.0.0.1")
+    for path in ("/", "/static/app.js", "/static/app.css"):
+        assert client.get(path).headers.get("cache-control") == "no-cache", path
+
+
+def test_index_versions_asset_urls_by_content(tmp_path):
+    import re as _re
+
+    from fastapi.testclient import TestClient
+
+    from model_committee.server import create_app
+
+    page = TestClient(create_app(tmp_path), base_url="http://127.0.0.1").get("/").text
+    assert _re.search(r'/static/app\.js\?v=[0-9a-f]{10}"', page)
+    assert _re.search(r'/static/app\.css\?v=[0-9a-f]{10}"', page)
