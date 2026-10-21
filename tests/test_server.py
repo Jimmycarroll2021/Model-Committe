@@ -610,3 +610,45 @@ def test_cancel_refuses_to_kill_the_server_itself(client: TestClient, runs_root:
     _running_manifest(runs_root, run_id, os.getpid(), process_started(os.getpid()))
     assert client.post(f"/api/runs/{run_id}/cancel").status_code == 409
     assert client.get(f"/api/runs/{run_id}").json()["status"] == "running"
+
+
+# ---------------------------------------------------------------- mode + answer artifacts
+
+
+@pytest.mark.parametrize("mode", ["auto", "research", "reasoning"])
+def test_post_passes_mode_through(client: TestClient, calls: list[dict], mode: str):
+    resp = client.post("/api/runs", json={"objective": "Pick one\nA. x\nB. y", "models": MODELS, "mode": mode})
+    assert resp.status_code == 202
+    _wait_for_status(client, resp.json()["run_id"], "succeeded")
+    assert calls[-1]["config"].mode == mode
+
+
+def test_post_rejects_unknown_mode(client: TestClient, calls: list[dict]):
+    resp = client.post("/api/runs", json={"objective": "Pick one", "models": MODELS, "mode": "vibes"})
+    assert resp.status_code == 422
+    assert calls == []
+
+
+def test_member_findings_and_synthesis_json_reach_the_ui(client: TestClient, runs_root: Path):
+    """The UI reads members[].findings from the manifest and the tally from synthesis.json."""
+    from model_committee.schemas import MemberFindings
+
+    run_id = "20261021-120000-mcq"
+    cfg = RunConfig(objective="Which?\nA. one\nB. two", models=MODELS[:2], mode="reasoning")
+    _write_run(runs_root, run_id, cfg)
+    manifest_path = runs_root / run_id / "run-manifest.json"
+    manifest = RunManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
+    manifest.members[0].findings = MemberFindings(summary="s", answer="B", confidence=0.89)
+    synthesis = {"answer_tally": {"B": [m.key for m in manifest.members]}, "mode": "reasoning",
+                 "members_succeeded": [m.key for m in manifest.members], "narrative": {"headline": "B"}}
+    (runs_root / run_id / "synthesis.json").write_text(json.dumps(synthesis), encoding="utf-8")
+    manifest.artifacts.append(ArtifactRecord(path="synthesis.json", sha256="x", kind="synthesis-data"))
+    manifest_path.write_text(manifest.model_dump_json(), encoding="utf-8")
+
+    got = client.get(f"/api/runs/{run_id}").json()
+    assert got["config"]["mode"] == "reasoning"
+    assert got["members"][0]["findings"]["answer"] == "B"
+    assert got["members"][0]["findings"]["confidence"] == 0.89
+    resp = client.get(f"/api/runs/{run_id}/files/synthesis.json")
+    assert resp.status_code == 200 and resp.headers["content-type"].startswith("application/json")
+    assert resp.json()["answer_tally"] == {"B": [m.key for m in manifest.members]}

@@ -286,6 +286,7 @@
       objective,
       models: selectedModels(),
       synthesizer: $("synthesizer").value,
+      mode: document.querySelector("input[name=mode]:checked").value,
       depth: document.querySelector("input[name=depth]:checked").value,
       deliverable: $("deliverable").value,
       criteria: $("criteria").value.split("\n").map((s) => s.trim()).filter(Boolean),
@@ -361,7 +362,7 @@
       id, manifest: null, status: "running", startedAt: null, finishedAt: null, error: null,
       members: new Map(), placeholders: [],
       stages: { research: "pending", synthesis: "pending", validation: "pending", outputs: "pending" },
-      ended: false, lastSynthesis: null,
+      ended: false, lastSynthesis: null, lastVerdict: null, verdict: null, options: {},
     };
   }
 
@@ -378,6 +379,7 @@
       const behind = rank(mr.status) < rank(cur.status);
       Object.assign(cur, {
         spec: mr.spec, label: mr.label, status: behind ? cur.status : mr.status, attempts: mr.attempts || cur.attempts,
+        findings: mr.findings || cur.findings,
         started: parseTs(mr.started_at) || cur.started, finished: parseTs(mr.finished_at) || cur.finished,
         error: mr.error || cur.error,
       });
@@ -476,6 +478,142 @@
       el("span", { class: "t", text: when === null ? "" : new Date(when).toLocaleTimeString() + " " }), parts.join(" · ")));
   }
 
+  // ------------------------------------------------------------------ answers (multiple choice)
+
+  const MODE_TEXT = { auto: "Auto mode", research: "Web research", reasoning: "Reasoning only" };
+
+  // Lettered options in the question: "A. text", "A) text", "(A) text", "A: text", or a lone "A" line
+  // followed by its text. Returns {letter: text} for a run of 2+ consecutive letters, else {}.
+  function parseOptions(objective) {
+    const lines = (objective || "").split(/\r?\n/);
+    let opts = {};
+    let next = "A";
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      let letter = null;
+      let text = "";
+      const inline = line.match(/^\(?([A-H])[).:]\s+(.+)$/);
+      if (inline) {
+        letter = inline[1];
+        text = inline[2];
+      } else if (/^\(?[A-H][).:]?$/.test(line)) {
+        letter = line.replace(/[^A-H]/g, "");
+        let j = i + 1;
+        while (j < lines.length && !lines[j].trim()) j++;
+        text = j < lines.length ? lines[j].trim() : "";
+      }
+      if (!letter) continue;
+      if (letter === next) {
+        opts[letter] = text;
+        next = String.fromCharCode(next.charCodeAt(0) + 1);
+      } else if (letter === "A" && Object.keys(opts).length < 2) {
+        opts = { A: text };
+        next = "B";
+      }
+    }
+    return Object.keys(opts).length >= 2 ? opts : {};
+  }
+
+  // Display form of the question: collapse runs of blank lines and put lone option letters beside their text.
+  function displayObjective(objective, options) {
+    let text = (objective || "").replace(/\r\n?/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+    if (Object.keys(options).length) {
+      text = text.replace(/^\(?([A-H])[).:]?[ \t]*\n+(?=\S)/gm, "$1. ")
+        .replace(/\n{2,}(?=\(?[B-H][).:] )/g, "\n");  // options on consecutive lines
+    }
+    return text;
+  }
+
+  // A member's pick: the option letter (findings.answer, else a leading letter in its recommendation, as the
+  // synthesizer counts it), or a short recommendation for open questions.
+  function memberPick(mem, options) {
+    const f = mem.findings;
+    if (!f) return null;
+    const conf = typeof f.confidence === "number" ? Math.round(f.confidence * 100) + "%" : "";
+    const letters = Object.keys(options);
+    for (const text of [f.answer, f.recommendation]) {
+      const m = (text || "").match(/^\W*(?:option|answer|choice)?\W*([A-H])\b/i);
+      if (!m) continue;
+      const letter = m[1].toUpperCase();
+      if (letters.length ? letters.includes(letter) : text === f.answer) return { letter, conf };
+    }
+    const rec = f.answer || f.recommendation || f.summary || "";
+    if (!rec) return null;
+    return { text: rec.length > 120 ? rec.slice(0, 117).trimEnd() + "…" : rec, conf };
+  }
+
+  function renderTally(run) {
+    const node = $("tally");
+    const counts = {};
+    let finished = 0;
+    for (const mem of run.members.values()) {
+      if (mem.status !== "pending" && mem.status !== "running") finished++;
+      if (mem.status !== "succeeded") continue;
+      const pick = memberPick(mem, run.options);
+      if (pick && pick.letter) counts[pick.letter] = (counts[pick.letter] || 0) + 1;
+    }
+    const total = run.members.size + run.placeholders.length;
+    const ranked = Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const settled = run.verdict && run.verdict.tally;
+    node.hidden = !ranked.length || Boolean(settled);
+    if (node.hidden) return;
+    const [top, ...rest] = ranked;
+    const lead = (finished < total && !run.ended ? "So far: " : "Votes: ") + top[0] + " ×" + top[1] + " of " + total;
+    node.replaceChildren(lead, rest.length
+      ? el("span", { class: "rest", text: " · " + rest.map(([l, n]) => l + " ×" + n).join(" · ") }) : "");
+  }
+
+  function renderVerdict(run) {
+    const box = $("verdict");
+    const v = run.verdict;
+    box.hidden = !v;
+    if (!v) return;
+    const main = $("verdict-main");
+    const sub = $("verdict-sub");
+    box.classList.toggle("split", Boolean(v.tally) && !v.unanimous);
+    box.classList.toggle("headline", !v.tally);
+    if (v.tally) {
+      const detail = v.count + "/" + v.total + (v.unanimous ? ", unanimous" : "")
+        + (v.others ? "; " + v.others : "");
+      main.replaceChildren("Committee answer: " + v.letter + " ", el("span", { class: "count", text: "(" + detail + ")" }));
+      sub.textContent = run.options[v.letter] || "";
+    } else {
+      main.textContent = v.headline;
+      sub.textContent = "";
+    }
+    sub.hidden = !sub.textContent;
+  }
+
+  async function loadVerdict(run, path) {
+    try {
+      const resp = await authFetch(fileUrl(run.id, path, false));
+      if (!resp.ok || state.run !== run) return;
+      const s = await resp.json();
+      const tally = Object.entries(s.answer_tally || {}).sort((a, b) => b[1].length - a[1].length);
+      if (tally.length) {
+        const total = (s.members_succeeded || []).length || tally.reduce((n, [, keys]) => n + keys.length, 0);
+        const [letter, keys] = tally[0];
+        run.verdict = {
+          tally: true, letter, count: keys.length, total, unanimous: tally.length === 1 && keys.length === total,
+          others: tally.slice(1).map(([l, k]) => l + " " + k.length).join(", "),
+        };
+      } else {
+        const headline = (s.narrative && s.narrative.headline) || "";
+        run.verdict = headline ? { tally: false, headline } : null;
+      }
+      renderRun();
+    } catch (_) { /* the synthesis markdown below still carries the answer */ }
+  }
+
+  function syncTitleToggle() {
+    const title = $("run-title");
+    const btn = $("title-toggle");
+    const open = title.classList.contains("open");
+    btn.hidden = !open && title.scrollHeight <= title.clientHeight + 2;
+    btn.textContent = open ? "Show less" : "Show full question";
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
   function renderRun() {
     const run = state.run;
     if (!run) return;
@@ -483,8 +621,14 @@
     const cfg = m.config || {};
     $("run-empty").hidden = true;
     $("run-body").hidden = false;
-    $("run-title").textContent = cfg.objective || run.id;
+    run.options = parseOptions(cfg.objective);
+    const titleText = cfg.objective ? displayObjective(cfg.objective, run.options) : run.id;
+    if ($("run-title").textContent !== titleText) $("run-title").textContent = titleText;
+    window.requestAnimationFrame(syncTitleToggle);
     $("run-status").replaceWith(Object.assign(pill(run.status), { id: "run-status" }));
+    const modeChip = $("run-mode");
+    modeChip.textContent = MODE_TEXT[cfg.mode] || "";
+    modeChip.hidden = !modeChip.textContent;
     $("run-id").textContent = run.id;
     $("cancel").hidden = run.ended || run.status !== "running";
 
@@ -497,14 +641,22 @@
 
     const list = $("members");
     const cards = [];
+    const arts = (run.manifest && run.manifest.artifacts) || [];
     for (const mem of run.members.values()) {
       const showLabel = mem.label && mem.label !== mem.spec;
+      const pick = mem.status === "succeeded" ? memberPick(mem, run.options) : null;
+      const report = arts.find((a) => a.path === "members/" + mem.key + ".md");
       cards.push(el("li", { class: "member s-" + (mem.status || "pending"), "data-key": mem.key },
         el("span", { class: "spec", text: mem.spec || mem.key }),
         showLabel ? el("span", { class: "label", text: mem.label }) : null,
         el("div", { class: "line" }, pill(displayStatus(mem.status, mem.error)), el("span", { class: "elapsed", "data-elapsed": mem.key })),
         mem.note && mem.status === "running" ? el("p", { class: "note", text: mem.note }) : null,
-        mem.error && displayStatus(mem.status, mem.error) === mem.status ? el("p", { class: "err", text: mem.error }) : null));
+        mem.error && displayStatus(mem.status, mem.error) === mem.status ? el("p", { class: "err", text: mem.error }) : null,
+        pick ? el("p", { class: "pick" + (pick.letter ? "" : " text") },
+          pick.letter ? "Answer: " + pick.letter : pick.text,
+          pick.conf ? el("span", { class: "conf", text: " · " + pick.conf }) : null) : null,
+        report ? el("a", { class: "more", href: fileUrl(run.id, report.path, false), target: "_blank",
+          rel: "noopener noreferrer", text: "Read report", "aria-label": "Read " + (mem.spec || mem.key) + " report" }) : null));
     }
     for (const spec of run.placeholders) {
       cards.push(el("li", { class: "member s-pending" }, el("span", { class: "spec", text: spec }),
@@ -516,6 +668,8 @@
     errBox.textContent = run.error || "";
     errBox.hidden = !run.error;
 
+    renderVerdict(run);
+    renderTally(run);
     renderArtifacts(run);
     tick();
   }
@@ -542,14 +696,27 @@
     link.hidden = !report;
     if (report) link.href = fileUrl(run.id, report.path, false);
 
-    const isMember = (a) => a.path.startsWith("members/") || /member/.test(a.kind || "");
-    const ordered = arts.filter((a) => !isMember(a)).concat(arts.filter(isMember));
-    $("artifacts").replaceChildren(...ordered.map((a) => el("li", null,
+    const isPrimary = (a) => /(^|\/)(report\.html|synthesis\.md)$|\.(xlsx|pptx)$/.test(a.path);
+    const isMember = (a) => /^members\/[^/]+\.md$/.test(a.path);
+    const primary = arts.filter(isPrimary).concat(arts.filter(isMember));
+    const other = arts.filter((a) => !isPrimary(a) && !isMember(a));
+    const row = (a) => el("li", null,
       el("span", { class: "path" }, a.path, el("span", { class: "kind", text: (a.kind || "").replace(/_/g, " ") })),
       el("span", { class: "acts" },
         el("a", { href: fileUrl(run.id, a.path, false), target: "_blank", rel: "noopener noreferrer", text: "Open",
           "aria-label": "Open " + a.path }),
-        el("a", { href: fileUrl(run.id, a.path, true), text: "Download", "aria-label": "Download " + a.path })))));
+        el("a", { href: fileUrl(run.id, a.path, true), text: "Download", "aria-label": "Download " + a.path })));
+    $("artifacts").replaceChildren(...primary.map(row));
+    $("artifacts").hidden = !primary.length;
+    $("artifacts-other").replaceChildren(...other.map(row));
+    $("other-files").hidden = !other.length;
+    $("other-files-summary").textContent = "Working files (" + other.length + ")";
+
+    const synthJson = arts.find((a) => /(^|\/)synthesis\.json$/.test(a.path));
+    if (synthJson && synthJson.sha256 !== run.lastVerdict) {
+      run.lastVerdict = synthJson.sha256;
+      loadVerdict(run, synthJson.path);
+    }
 
     const synth = arts.find((a) => /(^|\/)synthesis\.md$/.test(a.path));
     if (synth && synth.sha256 !== run.lastSynthesis) {
@@ -587,6 +754,7 @@
     const run = newRun(runId);
     state.run = run;
     $("event-log").replaceChildren();
+    $("run-title").classList.remove("open");
     $("synthesis").hidden = true;
     $("synthesis-body").replaceChildren();
     try {
@@ -661,6 +829,10 @@
       list.replaceChildren(el("li", { class: "history-empty", text: "Could not load history: " + err.message }));
       return;
     }
+    const signature = JSON.stringify(rows.map((r) => [r.run_id, r.status, r.error,
+      (r.members || []).map((m) => m.status).join()]));
+    if (signature === state.historySig) return;
+    state.historySig = signature;
     if (!rows.length) {
       list.replaceChildren(el("li", { class: "history-empty", text: "No runs yet. Your first run will appear here." }));
       return;
@@ -797,6 +969,12 @@
     $("context-files").addEventListener("change", onFilesChosen);
     const params = initToken();
     state.ticker = window.setInterval(tick, 1000);
+    // Runs can also start from the CLI or MCP server, so keep the history fresh while the page is visible.
+    window.setInterval(() => { if (document.visibilityState === "visible") loadHistory(); }, 10000);
+    $("title-toggle").addEventListener("click", () => {
+      $("run-title").classList.toggle("open");
+      syncTitleToggle();
+    });
     // Providers first: with a token, that bearer request sets the cookie EventSource needs.
     const openFromHash = (p) => {
       const run = p.get("run");

@@ -21,6 +21,7 @@ from model_committee.outputs import (
     STANCE_LABEL,
     STATUS_LABEL,
     claims_by_class,
+    committee_vote,
     consensus_text,
     fmt_confidence,
     fmt_cost,
@@ -369,12 +370,42 @@ def _title_slide(
     )
 
 
-def _answer_slide(deck: _Deck, synthesis: Synthesis, grouped: dict[Classification, list[CanonicalClaim]]) -> None:
+def _vote_box(s: Slide, synthesis: Synthesis, names: dict[str, str], width: float) -> float:
+    """Committee answer and vote split for lettered-option objectives. Returns the height used."""
+    vote = committee_vote(synthesis)
+    if vote is None:
+        return 0.0
+    fill, fg = CLASS_COLORS[Classification.agreement if vote.winner else Classification.disagreement]
+    height = 1.15
+    _rect(s, MARGIN, CONTENT_TOP, width - 0.1, height, fill)
+    title = f"Committee answer: {vote.winner}" if vote.winner else "No majority: the committee is split"
+    who = "  ·  ".join(f"{opt}: {', '.join(names.get(k, k) for k in keys)}" for opt, keys in vote.options.items())
+    _textbox(
+        s,
+        MARGIN + 0.1,
+        CONTENT_TOP + 0.05,
+        width - 0.3,
+        height - 0.1,
+        [
+            Para(f"{title}  ({vote.split})", bold=True, color=fg, space_after=4),
+            Para(who, size=0.55, color=INK_2, space_after=0),
+        ],
+        max_pt=26,
+        min_pt=14,
+        anchor=MSO_ANCHOR.MIDDLE,
+    )
+    return height + 0.15
+
+
+def _answer_slide(
+    deck: _Deck, synthesis: Synthesis, grouped: dict[Classification, list[CanonicalClaim]], names: dict[str, str]
+) -> None:
     n = synthesis.narrative
     s = deck.slide("Answer and recommendation")
     left_w = 8.4
+    used = _vote_box(s, synthesis, names, left_w)
     lead = plain(n.answer).strip().split("\n\n")[0]  # first paragraph; the full answer lives in the report
-    _textbox(s, MARGIN - 0.1, CONTENT_TOP, left_w, 2.35, [Para(lead)], max_pt=20, min_pt=12)
+    _textbox(s, MARGIN - 0.1, CONTENT_TOP + used, left_w, 2.35 - used, [Para(lead)], max_pt=20, min_pt=11)
     rec_top = CONTENT_TOP + 2.5
     _rect(s, MARGIN, rec_top, left_w - 0.1, 2.0, PANEL)
     _rect(s, MARGIN, rec_top, 0.08, 2.0, NAVY)
@@ -620,7 +651,7 @@ def write_pptx(
     deck = _Deck(synthesis.objective)
 
     _title_slide(deck, synthesis, members, config, names)
-    _answer_slide(deck, synthesis, grouped)
+    _answer_slide(deck, synthesis, grouped, names)
     deck.bullets_slides(
         "Agreement",
         [_claim_item(c, _facts(c, n_members)) for c in grouped[Classification.agreement]],

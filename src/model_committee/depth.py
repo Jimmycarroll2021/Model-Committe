@@ -54,3 +54,15 @@ BUDGETS: dict[Depth, DepthBudget] = {
 
 def budget_for(depth: Depth) -> DepthBudget:
     return BUDGETS[depth]
+
+
+# Self-contained questions (everything needed is in the prompt): no browsing, short answers, quick synthesis.
+REASONING_BUDGET = DepthBudget(
+    report_words=200,
+    max_sources=0,
+    max_claims=5,
+    member_timeout_s=300,
+    synthesis_timeout_s=300,
+    search_guidance="",
+    synthesis_granularity="main findings only",
+)

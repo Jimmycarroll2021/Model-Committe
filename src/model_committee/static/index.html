@@ -56,6 +56,16 @@
       </div>
 
       <fieldset class="field">
+        <legend>Mode</legend>
+        <div class="segmented" aria-describedby="mode-hint">
+          <input type="radio" name="mode" id="mode-auto" value="auto" checked><label for="mode-auto">Auto</label>
+          <input type="radio" name="mode" id="mode-research" value="research"><label for="mode-research">Research the web</label>
+          <input type="radio" name="mode" id="mode-reasoning" value="reasoning"><label for="mode-reasoning">Reasoning only</label>
+        </div>
+        <p class="hint after" id="mode-hint">Auto: multiple-choice questions skip web research.</p>
+      </fieldset>
+
+      <fieldset class="field">
         <legend>Depth</legend>
         <div class="segmented">
           <input type="radio" name="depth" id="depth-brief" value="brief"><label for="depth-brief">Brief</label>
@@ -106,16 +116,23 @@
     </div>
     <div id="run-body" hidden>
       <div class="run-head">
-        <div>
-          <h2 id="run-title"></h2>
-          <p class="run-meta"><span id="run-status" class="pill"></span> <span id="run-id"></span> <span id="run-elapsed" class="num"></span></p>
+        <div class="run-head-text">
+          <h2 id="run-title" class="clamped"></h2>
+          <button type="button" id="title-toggle" class="link-btn" aria-controls="run-title" aria-expanded="false" hidden>Show full question</button>
+          <p class="run-meta"><span id="run-status" class="pill"></span> <span id="run-mode" class="chip" hidden></span> <span id="run-id"></span> <span id="run-elapsed" class="num"></span></p>
         </div>
         <button type="button" id="cancel" class="btn-quiet danger" hidden>Cancel run</button>
       </div>
 
       <ol id="stages" class="stages" aria-label="Run stages"></ol>
 
+      <div id="verdict" class="verdict" role="status" hidden>
+        <p id="verdict-main" class="verdict-main"></p>
+        <p id="verdict-sub" class="verdict-sub" hidden></p>
+      </div>
+
       <h3 class="sub">Members</h3>
+      <p id="tally" class="tally" aria-live="polite" hidden></p>
       <ul id="members" class="members"></ul>
 
       <div id="run-error" class="run-error" role="alert" hidden></div>
@@ -124,6 +141,10 @@
         <a id="open-report" class="btn-primary report-link" target="_blank" rel="noopener noreferrer" hidden>Open report</a>
         <h3 class="sub">Files</h3>
         <ul id="artifacts" class="artifacts"></ul>
+        <details id="other-files" class="more-files" hidden>
+          <summary id="other-files-summary">Working files</summary>
+          <ul id="artifacts-other" class="artifacts"></ul>
+        </details>
       </div>
 
       <section id="synthesis" class="synthesis" aria-labelledby="synthesis-title" hidden>

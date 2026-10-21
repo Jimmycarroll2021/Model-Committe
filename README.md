@@ -68,6 +68,7 @@ uv run committee mcp                             # MCP server on stdio (see "Use
 |---|---|
 | `-m <spec>` | A committee member (repeat 2-8 times). See provider specs below. |
 | `--depth` | `brief`, `standard` or `detailed`. Default `auto`: inferred from phrasing such as "quick take" or "thorough analysis", else `standard`. |
+| `--mode` | `research` (members search the web and cite sources) or `reasoning` (self-contained question: no browsing, ~200-word answers, each member states its pick; about 1-2 minutes). Default `auto`: questions with lettered options (A/B/C/D on their own lines) use `reasoning`, everything else `research`. With options, the vote is tallied in code and leads every output ("Committee answer: B (3/3, unanimous)"); a tie for first is reported as "No majority". |
 | `--deliverable` | `none`, `report`, `spreadsheet`, `deck` or `all`. Default `auto`: "build a deck" / "export a spreadsheet" in the objective pick those, else `report`. |
 | `--criteria` | A decision criterion every member must address (repeatable). |
 | `--context` | A file every member receives (repeatable). Text is extracted and snapshotted. |

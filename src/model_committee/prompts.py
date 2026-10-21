@@ -8,10 +8,11 @@ import secrets
 
 from model_committee.context import ContextBundle
 from model_committee.depth import DepthBudget
-from model_committee.schemas import DisagreementType, MemberReport, RunConfig
+from model_committee.schemas import DisagreementType, MemberReport, Mode, RunConfig
 
 MEMBER_JSON_SHAPE = """{
   "summary": "2-4 sentence answer to the objective",
+  "answer": "if the objective lists lettered options: the single letter you choose, otherwise null",
   "recommendation": "your recommendation, or null if the objective is not a decision",
   "confidence": 0.0-1.0 overall confidence,
   "assumptions": ["assumption you made", ...],
@@ -53,7 +54,34 @@ def _context_section(bundle: ContextBundle) -> str:
     return "\n\n".join(parts)
 
 
-def member_prompt(config: RunConfig, budget: DepthBudget, bundle: ContextBundle) -> str:
+def reasoning_prompt(config: RunConfig, budget: DepthBudget, bundle: ContextBundle, options: list[str]) -> str:
+    pick = (f'Choose exactly one option ({", ".join(options)}) and put its letter in "answer".' if options
+            else 'Put your one-line answer in "answer".')
+    return f"""You are an independent member of a committee. Other members, running different AI models, answer the same
+question separately; you will not see their work. Your answer will be compared with theirs.
+
+This is a self-contained reasoning question: everything needed is in the question. Do not browse or look anything
+up. Reason from the facts given and general professional knowledge. {pick}
+
+# Question
+{config.objective}
+
+{_context_section(bundle)}
+
+# Output format
+Write at most {budget.report_words} words with these headings:
+## Answer (the option letter and one sentence) / ## Reasoning / ## Why not the others / ## Assumptions
+
+Then end your reply with exactly ONE fenced ```json block (nothing after it) with this shape, containing at most
+{budget.max_claims} atomic claims (your answer, and the key reason each other option fails). Evidence may be empty.
+```json
+{MEMBER_JSON_SHAPE}
+```"""
+
+
+def member_prompt(config: RunConfig, budget: DepthBudget, bundle: ContextBundle, options: list[str] | None = None) -> str:
+    if config.mode == Mode.reasoning:
+        return reasoning_prompt(config, budget, bundle, options or [])
     criteria = "\n".join(f"- {c}" for c in config.criteria) or "- (none given; choose sensible criteria and state them)"
     if config.allow_web:
         method = (f"{budget.search_guidance} Use roughly {budget.max_sources} high-quality sources, preferring "
@@ -82,6 +110,7 @@ Your report will be compared claim-by-claim against theirs, so be explicit, spec
 3. Cite sources for factual claims (URL plus a short verbatim quote where possible). Never invent URLs or quotes;
    if you could not verify something, say so and lower your confidence.
 4. Give a recommendation (if the objective is a decision), a confidence level, and the strongest counterargument.
+   If the objective lists lettered options, put the letter you choose in "answer".
 5. Identify what evidence would change your recommendation.
 6. Do not create, edit or delete any files. Do not ask questions: make reasonable assumptions and state them.
 
@@ -115,9 +144,11 @@ def _member_digest(members: list[MemberReport], *, with_claims: bool) -> str:
         entry: dict = {"member": m.key, "model": m.label}
         if m.findings:
             f = m.findings
-            entry |= {"summary": f.summary, "recommendation": f.recommendation, "confidence": f.confidence,
-                      "assumptions": f.assumptions, "counterargument": f.counterargument,
-                      "would_change_mind": f.would_change_mind}
+            entry |= {"summary": f.summary, "answer": f.answer, "recommendation": f.recommendation,
+                      "confidence": f.confidence, "assumptions": f.assumptions,
+                      "counterargument": f.counterargument, "would_change_mind": f.would_change_mind}
+            if not with_claims:  # the synthesizer may only cite these, so it must see them
+                entry["source_urls"] = sorted({e.url for c in f.claims for e in c.evidence if e.url})
             if with_claims:
                 entry["claims"] = [
                     {"ref": f"{m.key}/{c.id}", "statement": c.statement, "confidence": c.confidence,
@@ -164,8 +195,16 @@ Reply with ONLY a fenced ```json block:
 ```"""
 
 
-def narrative_prompt(config: RunConfig, members: list[MemberReport], matrix_json: str, granularity: str) -> str:
+def narrative_prompt(config: RunConfig, members: list[MemberReport], matrix_json: str, granularity: str,
+                     tally: dict[str, list[str]] | None = None) -> str:
     criteria = ", ".join(config.criteria) or "(none given)"
+    if tally:
+        votes = "; ".join(f"{opt}: {len(keys)} ({', '.join(keys)})" for opt, keys in tally.items())
+        lead = (f"ANSWER TALLY (computed in code from each member's pick): {votes}\n"
+                "Start the headline with the committee's answer and the vote (e.g. \"B (3/3): ...\"). If members split, "
+                "say which answer the evidence favours and why the others differ.\n")
+    else:
+        lead = ""
     return f"""You are the synthesizer for a research committee. Independent members (different AI models) researched
 the objective below. A claim matrix has already been computed: each canonical claim has every member's stance and a
 deterministic classification (agreement / disagreement / unique / contested), the model-consensus share, and the
@@ -174,8 +213,8 @@ number of independent source domains behind it.
 OBJECTIVE: {config.objective}
 DECISION CRITERIA: {criteria}
 SYNTHESIS GRANULARITY: {granularity}
-
-Your job is to write the unified answer. Rules:
+{lead}
+Your job is to write the unified answer. Keep it proportionate: a short question gets a short answer. Rules:
 - This is not a vote. Resolve disagreements by evidence quality and assumptions, not by counting members.
   A minority or unique finding may be the most important one: keep it if it matters.
 - Distinguish model consensus (how many members agree) from independent source support (how many distinct sources).

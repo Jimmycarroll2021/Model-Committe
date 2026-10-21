@@ -25,6 +25,12 @@ class Depth(StrEnum):
     detailed = "detailed"
 
 
+class Mode(StrEnum):
+    auto = "auto"  # reasoning if the objective is self-contained multiple choice, else research
+    research = "research"  # members search the web and cite sources
+    reasoning = "reasoning"  # everything needed is in the question: no browsing, short answers, a pick each
+
+
 class JoinPolicy(StrEnum):
     all = "all"  # wait for every member; fail the run if fewer than min_members succeed
     quorum = "quorum"  # once min_members succeed, give stragglers quorum_grace_s then cancel them
@@ -46,6 +52,7 @@ class RunConfig(BaseModel):
     models: list[str] = Field(description="Provider specs, e.g. 'claude-cli', 'agy:gemini-3.8-flash-high'")
     synthesizer: str = "claude-cli"
     depth: Depth = Depth.standard
+    mode: Mode = Mode.auto
     deliverable: Deliverable = Deliverable.report
     context_paths: list[str] = Field(default_factory=list)
     criteria: list[str] = Field(default_factory=list, description="Decision criteria members must address")
@@ -94,6 +101,7 @@ class MemberFindings(BaseModel):
     """Structured block every member must append to its prose report."""
 
     summary: str
+    answer: str | None = Field(default=None, description="For lettered options: the chosen letter")
     recommendation: str | None = None
     confidence: float = Field(ge=0, le=1)
     assumptions: list[str] = Field(default_factory=list)
@@ -245,6 +253,9 @@ class Synthesis(BaseModel):
     matrix: ClaimMatrix
     members_succeeded: list[str]
     members_missing: list[str]
+    mode: str = "research"
+    # Computed in code from members' picks: option letter -> member keys, most votes first.
+    answer_tally: dict[str, list[str]] = Field(default_factory=dict)
     markdown: str = ""
 
 

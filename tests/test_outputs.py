@@ -16,7 +16,7 @@ from model_committee.outputs.deck import ROWS_PER_TABLE, write_pptx
 from model_committee.outputs.report import md, render_html
 from model_committee.outputs.spreadsheet import write_xlsx
 from model_committee.schemas import DecisionRow, Deliverable, MemberStatus
-from tests.sample_data import M1, M3, UNTRACEABLE_URL, make_sample
+from tests.sample_data import M1, M2, M3, UNTRACEABLE_URL, make_sample
 
 XSS = "<script>alert('xss')</script>"
 
@@ -24,6 +24,7 @@ VARIANTS = {
     "full": {},
     "failed": {"failed_member": True},
     "empty": {"empty": True},
+    "mcq": {"mcq": True},
 }
 
 
@@ -347,3 +348,63 @@ def test_answer_markdown_is_rendered_not_shown_raw():
     assert "<strong>Default: pgvector.</strong>" in page and "<li>point one</li>" in page
     assert "**Default" not in page
     assert plain("**bold** and *it* with [link](https://x.example) `code`") == "bold and it with link code"
+
+
+# ---------------------------------------------------------------- lettered-option (MCQ) answers
+
+
+def test_html_mcq_answer_banner():
+    page = render_html(**make_sample(mcq=True))
+    assert "Committee answer: B" in page
+    assert "B 2 · C 1" in page
+    banner = page[page.index('class="verdict"') : page.index("</ul></div>", page.index('class="verdict"'))]
+    assert "Claude (CLI), Codex (CLI)" in banner and "Gemini 3.8 Flash (agy)" in banner
+    assert page.index("Committee answer") < page.index('<section id="answer">')  # leads the report
+    assert "\nB) Contoso Freight\n" in page and ".objective-text{white-space:pre-line}" in page
+    assert "<dt>Mode</dt><dd>Reasoning</dd>" in page
+    assert page.count('<strong class="pick">B</strong>') == 2  # each member's pick in the appendix
+    assert page.count('<strong class="pick">C</strong>') == 1
+
+
+def test_html_mcq_unanimous_and_tie():
+    sample = make_sample(mcq=True, failed_member=True)  # m3 (the C vote) failed
+    page = render_html(**sample)
+    assert "Committee answer: B" in page and "2/2, unanimous" in page
+    sample["synthesis"].answer_tally = {"A": [M1], "B": [M2]}
+    page = render_html(**sample)
+    assert "Committee answer" not in page
+    assert "No majority" in page and "A 1 · B 1" in page
+
+
+def test_html_no_banner_without_options():
+    page = render_html(**make_sample())
+    assert "Committee answer" not in page and 'class="pick"' not in page
+    assert "<dt>Mode</dt><dd>Research</dd>" in page
+
+
+def test_html_mcq_escapes_options_and_picks():
+    sample = make_sample(mcq=True)
+    sample["synthesis"].answer_tally = {XSS: [M1, M2], "C": [M3]}
+    next(m for m in sample["members"] if m.key == M1).findings.answer = XSS
+    sample["synthesis"].objective = f"Pick one\nA) {XSS}"
+    page = render_html(**sample)
+    assert "<script" not in page.lower()
+    assert "Committee answer: &lt;script&gt;" in page
+
+
+def test_xlsx_members_answer_column(tmp_path: Path):
+    sample = make_sample(mcq=True)
+    path = tmp_path / "c.xlsx"
+    write_xlsx(path, synthesis=sample["synthesis"], members=sample["members"], validation=sample["validation"])
+    ws = load_workbook(path)["Members"]
+    header = [c.value for c in ws[1]]
+    picks = {r[0]: r[header.index("Answer")] for r in ws.iter_rows(min_row=2, values_only=True)}
+    assert picks == {M1: "B", M2: "B", M3: "C"}
+
+
+def test_pptx_answer_slide_leads_with_vote(tmp_path: Path):
+    prs = _write_deck(tmp_path, make_sample(mcq=True))
+    answer = _slide_text(prs.slides[1])
+    assert "Committee answer: B  (B 2 · C 1)" in answer
+    assert answer.index("Committee answer") < answer.index("Contoso Freight is the lowest-cost")
+    assert "Committee answer" not in _slide_text(_write_deck(tmp_path, make_sample()).slides[1])

@@ -8,6 +8,7 @@ matrix, so the narrative stage cannot silently drop a minority finding.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -75,13 +76,36 @@ async def align_claims(
     return matrix, warnings
 
 
+_PICK = re.compile(r"^\W*(?:option|answer|choice)?\W*([A-H])\b", re.IGNORECASE)
+
+
+def member_pick(member: MemberReport, options: list[str]) -> str | None:
+    """The option letter a member chose: its `answer` field, else the start of its recommendation."""
+    if not member.findings or not options:
+        return None
+    for text in (member.findings.answer, member.findings.recommendation):
+        m = _PICK.match(text or "")
+        if m and m.group(1).upper() in options:
+            return m.group(1).upper()
+    return None
+
+
+def tally_answers(members: list[MemberReport], options: list[str]) -> dict[str, list[str]]:
+    """Option -> members that picked it, most votes first. Counted in code, never by the synthesizer."""
+    tally: dict[str, list[str]] = {}
+    for m in members:
+        if pick := member_pick(m, options):
+            tally.setdefault(pick, []).append(m.key)
+    return dict(sorted(tally.items(), key=lambda kv: (-len(kv[1]), kv[0])))
+
+
 async def write_narrative(
     provider: Provider, config: RunConfig, members: list[MemberReport], matrix: ClaimMatrix, *,
-    granularity: str, workdir: Path, timeout_s: float,
+    granularity: str, workdir: Path, timeout_s: float, tally: dict[str, list[str]] | None = None,
 ) -> tuple[SynthesisNarrative, list[str]]:
     matrix_json = json.dumps(_matrix_digest(matrix), indent=1, ensure_ascii=False)
     try:
-        narrative, _ = await _ask(provider, narrative_prompt(config, members, matrix_json, granularity),
+        narrative, _ = await _ask(provider, narrative_prompt(config, members, matrix_json, granularity, tally),
                                   SynthesisNarrative, workdir=workdir, timeout_s=timeout_s)
         return narrative, []
     except (SynthesisError, ProviderError, TimeoutError) as exc:
@@ -205,7 +229,17 @@ def _stances(claim: CanonicalClaim) -> str:
 def render_markdown(synth: Synthesis, members: list[MemberReport]) -> str:
     n = synth.narrative
     by_class = {c: [x for x in synth.matrix.claims if x.classification == c] for c in Classification}
-    out = [f"# {n.headline}", "", f"**Objective:** {synth.objective}", "",
+    out = [f"# {n.headline}", ""]
+    if synth.answer_tally:
+        total = len(synth.members_succeeded)
+        votes = [f"**{opt}**: {len(keys)}/{total} ({', '.join(keys)})" for opt, keys in synth.answer_tally.items()]
+        counts = [len(keys) for keys in synth.answer_tally.values()]
+        unanimous = len(counts) == 1 and counts[0] == total
+        tied = len(counts) > 1 and counts[0] == counts[1]
+        lead = ("**No majority: the committee is split**" if tied
+                else f"**Committee answer: {next(iter(synth.answer_tally))}**" + (" (unanimous)" if unanimous else ""))
+        out += [lead + " | votes: " + " · ".join(votes), ""]
+    out += [f"**Objective:** {synth.objective}", "",
            f"Synthesizer: `{synth.synthesizer}` | members reporting: {len(synth.members_succeeded)}"
            + (f" | missing: {', '.join(synth.members_missing)}" if synth.members_missing else ""), "",
            "## Answer", "", n.answer, ""]

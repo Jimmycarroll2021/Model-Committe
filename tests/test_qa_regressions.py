@@ -148,3 +148,75 @@ def test_router_ignores_topic_words(objective):
 
     assert infer_deliverable(objective) is Deliverable.report
     assert infer_depth(objective) is Depth.standard
+
+
+# ---------------------------------------------------------------- multiple-choice / reasoning mode
+
+MCQ = ('A customer writes: "Third time the courier has messed this up." What should the agent do?\n\n'
+       "A\nEscalate to a human.\n\nB\nAcknowledge and offer the reship now.\n\nC\nAsk for a 1-5 rating.\n\n"
+       "D\nReship silently.")
+
+
+def test_detects_lettered_options_but_not_prose():
+    from model_committee.router import detect_options, infer_mode
+    from model_committee.schemas import Mode
+
+    assert detect_options(MCQ) == ["A", "B", "C", "D"]
+    assert detect_options("Pick:\nA) Postgres\nB) Qdrant") == ["A", "B"]
+    assert detect_options("Plan A is cheap.\nPlan B is fast.") == []
+    assert infer_mode(MCQ) is Mode.reasoning and infer_mode("Which DB for 5M docs?") is Mode.research
+
+
+def test_tally_uses_answer_then_recommendation():
+    from model_committee.synthesis import tally_answers
+
+    def m(key, answer=None, rec=None):
+        f = MemberFindings(summary="s", confidence=0.9, answer=answer, recommendation=rec)
+        return MemberReport(key=key, spec=key, label=key, vendor="t", status=MemberStatus.succeeded, findings=f)
+
+    members = [m("m1", answer="B"), m("m2", rec="Option B: acknowledge"), m("m3", answer="d"), m("m4", rec="unsure")]
+    assert tally_answers(members, ["A", "B", "C", "D"]) == {"B": ["m1", "m2"], "D": ["m3"]}
+    assert tally_answers(members, []) == {}
+
+
+async def test_mcq_runs_in_reasoning_mode_without_web_and_reports_tally(tmp_path: Path):
+    pick_b = member_reply([claim("c1", "B is correct")], recommendation="B")
+    providers = {
+        "a": FakeProvider(research_reply=pick_b), "b": FakeProvider(research_reply=pick_b),
+        "c": FakeProvider(research_reply=member_reply([claim("c1", "D is fastest")], recommendation="D")),
+        "s": FakeProvider(synth_replies=[json.dumps({"claims": []}), NARRATIVE]),
+    }
+    cfg = RunConfig(objective=MCQ, models=["a", "b", "c"], synthesizer="s", deliverable=Deliverable.none)
+    result = await run_committee(cfg, runs_root=tmp_path, provider_factory=factory(providers))
+    assert result.manifest.status == "succeeded"
+    assert result.manifest.config.mode == "reasoning" and result.manifest.config.allow_web is False
+    member_prompt_text = providers["a"].calls[0][1]
+    assert "Do not browse" in member_prompt_text and "Choose exactly one option (A, B, C, D)" in member_prompt_text
+    assert result.synthesis.answer_tally == {"B": ["m1-a", "m2-b"], "D": ["m3-c"]}
+    narrative_prompt_text = providers["s"].calls[-1][1]
+    assert "ANSWER TALLY" in narrative_prompt_text and "B: 2 (m1-a, m2-b)" in narrative_prompt_text
+    md = (result.run_dir / "synthesis.md").read_text(encoding="utf-8")
+    assert md.splitlines()[2].startswith("**Committee answer: B**") and "unanimous" not in md.splitlines()[2]
+    warnings = json.loads((result.run_dir / "validation.json").read_text(encoding="utf-8"))["warnings"]
+    assert not [w for w in warnings if "source domain" in w or "no web searches" in w]  # no sources by design
+
+
+def test_narrative_prompt_shows_member_source_urls():
+    from model_committee.prompts import narrative_prompt
+
+    f = MemberFindings(summary="s", confidence=0.5, claims=[
+        {"id": "c1", "statement": "x", "confidence": 0.5, "evidence": [{"source": "s", "url": "https://src.example/a"}]}])
+    member = MemberReport(key="m1", spec="a", label="a", vendor="t", status=MemberStatus.succeeded, findings=f)
+    cfg = RunConfig(objective="question?", models=["a", "b"])
+    assert "https://src.example/a" in narrative_prompt(cfg, [member], "[]", "main findings")
+
+
+def test_tied_vote_names_no_winner():
+    from model_committee.synthesis import render_markdown
+    from tests.sample_data import make_sample
+
+    synth = make_sample(mcq=True)["synthesis"]
+    synth.answer_tally = {"B": ["m1"], "C": ["m2"]}
+    synth.members_succeeded = ["m1", "m2"]
+    first = render_markdown(synth, [])[: 400]
+    assert "No majority" in first and "Committee answer" not in first

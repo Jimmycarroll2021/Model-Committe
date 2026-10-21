@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -232,3 +233,29 @@ def truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: max(limit - 1, 1)].rstrip() + "…"
+
+
+@dataclass
+class Vote:
+    winner: str | None  # None when the top options are tied
+    split: str  # "3/3, unanimous" or "B 2 · D 1"
+    total: int  # members that reported (the denominator)
+    options: dict[str, list[str]]  # option -> member keys, most votes first
+
+
+def committee_vote(synthesis: Synthesis) -> Vote | None:
+    """Summarize Synthesis.answer_tally for display. None when the objective had no lettered options."""
+    tally = synthesis.answer_tally
+    if not tally:
+        return None
+    total = len(synthesis.members_succeeded) or sum(len(keys) for keys in tally.values())
+    counts = [len(keys) for keys in tally.values()]
+    first = next(iter(tally))
+    winner = first if len(counts) == 1 or counts[0] > counts[1] else None
+    if len(tally) == 1 and counts[0] == total:
+        split = f"{total}/{total}, unanimous"
+    else:
+        split = " · ".join(f"{opt} {len(keys)}" for opt, keys in tally.items())
+        if (abstained := total - sum(counts)) > 0:
+            split += f" · no pick {abstained}"
+    return Vote(winner=winner, split=split, total=total, options=dict(tally))

@@ -160,7 +160,8 @@ async def validate(
     if not report.unique_findings_preserved:
         report.warnings.append("some unique findings are missing from the synthesis text")
 
-    for c in synthesis.matrix.claims:
+    researched = synthesis.mode != "reasoning"  # reasoning mode cites no sources by design
+    for c in synthesis.matrix.claims if researched else []:
         if c.classification == Classification.agreement and c.independent_sources <= 1:
             report.warnings.append(
                 f"{c.id}: agreement of {c.support} members rests on {c.independent_sources} independent source "
@@ -173,7 +174,7 @@ async def validate(
             report.warnings.append(f"{m.key}: structured findings could not be parsed; claims missing from matrix")
         elif m.parse_error:
             report.warnings.append(f"{m.key}: {m.parse_error}")
-        elif m.telemetry and m.telemetry.web_searches == 0 and not m.telemetry.tool_calls:
+        elif researched and m.telemetry and m.telemetry.web_searches == 0 and not m.telemetry.tool_calls:
             report.warnings.append(f"{m.key} made no web searches or tool calls - findings rest on model knowledge")
     for f in bundle.flagged:
         report.warnings.append(f"context file {f.name} contains possible prompt-injection text: {f.injection_flags}")

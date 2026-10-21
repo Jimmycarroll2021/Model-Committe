@@ -4,6 +4,7 @@
     sample = make_sample()                     # 3 members, every classification present
     sample = make_sample(failed_member=True)   # m3 failed: excluded from the matrix, shown as failed
     sample = make_sample(empty=True)           # no claims, no decision matrix, no risks/actions
+    sample = make_sample(mcq=True)             # lettered options, reasoning mode, 2-1 vote (B: m1, m2; C: m3)
 
 Returns {"config": RunConfig, "synthesis": Synthesis, "members": list[MemberReport],
 "validation": ValidationReport}. Classification counts are derived from the stances so they stay
@@ -28,6 +29,7 @@ from model_committee.schemas import (
     MemberFindings,
     MemberReport,
     MemberStatus,
+    Mode,
     Position,
     ProviderTelemetry,
     RunConfig,
@@ -41,9 +43,20 @@ OBJECTIVE = (
     "~12,000 orders/month choose for 2027: Northwind Logistics, Contoso Freight or Fabrikam Fulfilment?"
 )
 
+MCQ_OBJECTIVE = "\n".join(
+    [
+        "Which 3PL provider should an Australian D2C apparel brand shipping ~12,000 orders/month choose for 2027?",
+        "A) Northwind Logistics",
+        "B) Contoso Freight",
+        "C) Fabrikam Fulfilment",
+        "D) Keep fulfilment in-house",
+    ]
+)
+
 CRITERIA = ["Cost per order", "Metro delivery SLA", "Contract flexibility", "Operational risk"]
 
 M1, M2, M3 = "m1-claude-cli", "m2-codex-cli", "m3-agy-gemini"
+MCQ_PICKS = {M1: "B", M2: "B", M3: "C"}
 
 UNTRACEABLE_URL = "https://www.3pl-rankings.example.com/australia-2026"
 
@@ -583,11 +596,25 @@ def _validation(empty: bool) -> ValidationReport:
     )
 
 
-def make_sample(*, failed_member: bool = False, empty: bool = False) -> dict:
+def _tally(members: list[MemberReport]) -> dict[str, list[str]]:
+    """Option -> member keys, most votes first (same ordering as synthesis.tally_answers)."""
+    tally: dict[str, list[str]] = {}
+    for m in members:
+        if m.findings and m.findings.answer:
+            tally.setdefault(m.findings.answer, []).append(m.key)
+    return dict(sorted(tally.items(), key=lambda kv: (-len(kv[1]), kv[0])))
+
+
+def make_sample(*, failed_member: bool = False, empty: bool = False, mcq: bool = False) -> dict:
     """Build a consistent committee run. See module docstring for the flags."""
     members = _members(failed_member)
     present = [m.key for m in members if m.status is MemberStatus.succeeded]
     missing = [m.key for m in members if m.status is not MemberStatus.succeeded]
+    objective = MCQ_OBJECTIVE if mcq else OBJECTIVE
+    if mcq:
+        for m in members:
+            if m.findings:
+                m.findings.answer = MCQ_PICKS[m.key]
 
     claims: list[CanonicalClaim] = []
     if not empty:
@@ -597,7 +624,8 @@ def make_sample(*, failed_member: bool = False, empty: bool = False) -> dict:
                 claims.append(_classify(claim.model_copy(update={"positions": positions}), members, present))
 
     config = RunConfig(
-        objective=OBJECTIVE,
+        objective=objective,
+        mode=Mode.reasoning if mcq else Mode.research,
         models=[m.spec for m in members],
         synthesizer="claude-cli",
         depth=Depth.standard,
@@ -606,7 +634,9 @@ def make_sample(*, failed_member: bool = False, empty: bool = False) -> dict:
         context_paths=["brief.md"],
     )
     synthesis = Synthesis(
-        objective=OBJECTIVE,
+        objective=objective,
+        mode="reasoning" if mcq else "research",
+        answer_tally=_tally(members) if mcq else {},
         synthesizer="claude-cli",
         narrative=_narrative(empty),
         matrix=ClaimMatrix(members=present, claims=claims),

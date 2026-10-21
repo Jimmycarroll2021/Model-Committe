@@ -12,24 +12,25 @@ from pathlib import Path
 
 from model_committee.artifacts import RunStore, new_run_id, process_started
 from model_committee.context import ContextBundle, load_context
-from model_committee.depth import budget_for
+from model_committee.depth import REASONING_BUDGET, budget_for
 from model_committee.guard import ensure_not_member
 from model_committee.member import member_key, run_member
 from model_committee.prompts import member_prompt
 from model_committee.providers.base import Provider
-from model_committee.router import activated_skills
+from model_committee.router import activated_skills, detect_options, infer_mode
 from model_committee.schemas import (
     Deliverable,
     Event,
     JoinPolicy,
     MemberReport,
     MemberStatus,
+    Mode,
     RunConfig,
     RunManifest,
     Synthesis,
     utcnow,
 )
-from model_committee.synthesis import align_claims, classify, render_markdown, write_narrative
+from model_committee.synthesis import align_claims, classify, render_markdown, tally_answers, write_narrative
 from model_committee.validation import validate
 
 
@@ -96,7 +97,14 @@ async def run_committee(
 
 
 async def _execute(config: RunConfig, store: RunStore, factory, emit) -> Synthesis:
+    options = detect_options(config.objective)
+    if config.mode is Mode.auto:
+        config = config.model_copy(update={"mode": infer_mode(config.objective)})
     budget = budget_for(config.depth)
+    if config.mode is Mode.reasoning:  # self-contained question: no web research, short answers
+        config = config.model_copy(update={"allow_web": False})
+        budget = REASONING_BUDGET
+    store.manifest.config = config  # record the resolved mode
     timings = store.manifest.timings
     providers = [factory(spec) for spec in config.models]
     synthesizer = factory(config.synthesizer)
@@ -110,9 +118,10 @@ async def _execute(config: RunConfig, store: RunStore, factory, emit) -> Synthes
     bundle = load_context(config.context_paths)
     for f in bundle.files:
         store.write_text(f"context/{f.name}.txt", f.text, kind="context")
-    emit(Event(type="context.loaded", detail=f"{len(bundle.files)} file(s); flagged: {len(bundle.flagged)}"))
+    emit(Event(type="context.loaded", detail=f"{config.mode.value} mode; {len(bundle.files)} file(s); "
+                                             f"flagged: {len(bundle.flagged)}"))
 
-    prompt = member_prompt(config, budget, bundle)
+    prompt = member_prompt(config, budget, bundle, options)
     store.write_text("prompts/member.md", prompt, kind="prompt")
     keys = [member_key(i, p.spec) for i, p in enumerate(providers)]
     store.manifest.members = [
@@ -141,11 +150,13 @@ async def _execute(config: RunConfig, store: RunStore, factory, emit) -> Synthes
                                           timeout_s=budget.synthesis_timeout_s)
     classify(matrix, ok)
     store.write_json("claim-matrix.json", matrix, kind="claim-matrix")
+    tally = tally_answers(ok, options)
     narrative, w2 = await write_narrative(synthesizer, config, ok, matrix, granularity=budget.synthesis_granularity,
-                                          workdir=workdir, timeout_s=budget.synthesis_timeout_s)
+                                          workdir=workdir, timeout_s=budget.synthesis_timeout_s, tally=tally)
     synthesis = Synthesis(
         objective=config.objective, synthesizer=synthesizer.spec, narrative=narrative, matrix=matrix,
         members_succeeded=[r.key for r in ok], members_missing=[r.key for r in reports if r not in ok],
+        mode=config.mode.value, answer_tally=tally,
     )
     synthesis.markdown = render_markdown(synthesis, reports)
     store.write_text("synthesis.md", synthesis.markdown, kind="synthesis")

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from model_committee.schemas import Deliverable, Depth
+from model_committee.schemas import Deliverable, Depth, Mode
 
 
 @dataclass(frozen=True)
@@ -37,6 +37,28 @@ _DEPTH_HINTS: list[tuple[Depth, re.Pattern[str]]] = [
                                 r"report|review|research))\b", re.I)),
     (Depth.brief, re.compile(r"\b(brief(ly)?|quick (take|answer|look|summary)|tl;?dr|summary only)\b", re.I)),
 ]
+
+
+# Option lines: "A", "A)", "A.", "(A) text", "A: text" at the start of a line.
+_OPTION_LINE = re.compile(r"^[ \t]*\(?([A-H])(?:[).:]|\)?[ \t]*$|[).:]?[ \t]+\S)", re.MULTILINE)
+
+
+def detect_options(objective: str) -> list[str]:
+    """Letters of a lettered multiple-choice list in the objective (A, B, C...), or [] if there isn't one."""
+    letters: list[str] = []
+    for m in _OPTION_LINE.finditer(objective):
+        letter = m.group(1)
+        expected = chr(ord("A") + len(letters))
+        if letter == expected:
+            letters.append(letter)
+        elif letter == "A":  # a new list started; keep the longer one
+            letters = ["A"] if len(letters) < 2 else letters
+    return letters if len(letters) >= 2 else []
+
+
+def infer_mode(objective: str) -> Mode:
+    """A lettered-option question carries everything needed: reason over it rather than research the web."""
+    return Mode.reasoning if detect_options(objective) else Mode.research
 
 
 def infer_deliverable(objective: str) -> Deliverable:

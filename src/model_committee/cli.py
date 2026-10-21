@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from model_committee.router import infer_deliverable, infer_depth
-from model_committee.schemas import MAX_MEMBERS, MIN_MEMBERS, Deliverable, Depth, Event, JoinPolicy, RunConfig
+from model_committee.schemas import MAX_MEMBERS, MIN_MEMBERS, Deliverable, Depth, Event, JoinPolicy, Mode, RunConfig
 
 DEFAULT_RUNS_DIR = None  # -> artifacts.default_runs_dir()
 
@@ -56,6 +56,7 @@ async def _cmd_run(args) -> int:
         models=args.model or list(DEFAULT_LINEUP),
         synthesizer=args.synthesizer,
         depth=Depth(args.depth) if args.depth != "auto" else infer_depth(objective),
+        mode=Mode(args.mode),
         deliverable=Deliverable(args.deliverable) if args.deliverable != "auto" else infer_deliverable(objective),
         context_paths=args.context or [],
         criteria=args.criteria or [],
@@ -148,6 +149,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help=f"member provider spec, repeat {MIN_MEMBERS}-{MAX_MEMBERS} times (default: default lineup)")
     run.add_argument("--synthesizer", default="claude-cli", help="provider spec for the synthesizer")
     run.add_argument("--depth", default="auto", choices=["auto", *[d.value for d in Depth]])
+    run.add_argument("--mode", default="auto", choices=[m.value for m in Mode],
+                     help="research: members search the web; reasoning: self-contained question, no browsing")
     run.add_argument("--deliverable", default="auto", choices=["auto", *[d.value for d in Deliverable]])
     run.add_argument("--context", action="append", help="context file (pdf, xlsx, text); repeatable")
     run.add_argument("--criteria", action="append", help="decision criterion; repeatable")

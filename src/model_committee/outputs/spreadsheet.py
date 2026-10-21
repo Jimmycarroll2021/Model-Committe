@@ -193,6 +193,7 @@ def _members_sheet(wb: Workbook, members: list[MemberReport], names: dict[str, s
             "Tokens",
             "Web searches",
             "Confidence",
+            "Answer",
             "Recommendation",
             "Summary",
             "Error",
@@ -215,6 +216,7 @@ def _members_sheet(wb: Workbook, members: list[MemberReport], names: dict[str, s
                 total_tokens(m),
                 t.web_searches if t else None,
                 f.confidence if f else None,
+                f.answer if f else None,
                 f.recommendation if f else None,
                 f.summary if f else None,
                 m.error or m.parse_error,
@@ -225,7 +227,7 @@ def _members_sheet(wb: Workbook, members: list[MemberReport], names: dict[str, s
         ws.cell(row, 11).number_format = "0%"
         if m.status is not MemberStatus.succeeded:
             ws.cell(row, 5).fill = PatternFill("solid", fgColor=_FILLS["reject"])
-    _finish(ws, {12: 50, 13: 50, 14: 50})
+    _finish(ws, {12: 10, 13: 50, 14: 50, 15: 50})
 
 
 def _decision_sheet(wb: Workbook, synthesis: Synthesis) -> None:
